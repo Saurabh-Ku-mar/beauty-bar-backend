@@ -2,17 +2,14 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
-const { OAuth2Client } = require('google-auth-library');
 const User = require('../models/User');
 
-const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
-
 // ============================================
-// EMAIL/PASSWORD REGISTRATION
+// CUSTOMER REGISTRATION
 // ============================================
 router.post('/register', async (req, res) => {
     try {
-        const { name, email, password, mobile } = req.body;
+        const { name, email, password, phone } = req.body;
         
         // Check if user already exists
         const existingUser = await User.findOne({ email });
@@ -23,12 +20,16 @@ router.post('/register', async (req, res) => {
             });
         }
         
+        // Hash password
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+        
         // Create new user
         const user = new User({
             name,
             email,
-            password,
-            mobile,
+            password: hashedPassword,
+            phone: phone || '',
             lastLogin: new Date()
         });
         
@@ -38,7 +39,7 @@ router.post('/register', async (req, res) => {
         const token = jwt.sign(
             { userId: user._id, email: user.email },
             process.env.JWT_SECRET,
-            { expiresIn: '7d' }
+            { expiresIn: '30d' }
         );
         
         res.json({
@@ -48,8 +49,8 @@ router.post('/register', async (req, res) => {
                 id: user._id,
                 name: user.name,
                 email: user.email,
-                mobile: user.mobile,
-                loyaltyPoints: user.loyaltyPoints
+                phone: user.phone,
+                loyaltyPoints: user.loyaltyPoints || 0
             }
         });
         
@@ -63,7 +64,7 @@ router.post('/register', async (req, res) => {
 });
 
 // ============================================
-// EMAIL/PASSWORD LOGIN
+// CUSTOMER LOGIN
 // ============================================
 router.post('/login', async (req, res) => {
     try {
@@ -78,16 +79,8 @@ router.post('/login', async (req, res) => {
             });
         }
         
-        // Check if user has password (Google users don't have password)
-        if (!user.password) {
-            return res.status(401).json({
-                success: false,
-                message: 'Please login with Google'
-            });
-        }
-        
         // Verify password
-        const isValid = await user.comparePassword(password);
+        const isValid = await bcrypt.compare(password, user.password);
         if (!isValid) {
             return res.status(401).json({
                 success: false,
@@ -103,7 +96,7 @@ router.post('/login', async (req, res) => {
         const token = jwt.sign(
             { userId: user._id, email: user.email },
             process.env.JWT_SECRET,
-            { expiresIn: '7d' }
+            { expiresIn: '30d' }
         );
         
         res.json({
@@ -113,9 +106,8 @@ router.post('/login', async (req, res) => {
                 id: user._id,
                 name: user.name,
                 email: user.email,
-                mobile: user.mobile,
-                picture: user.picture,
-                loyaltyPoints: user.loyaltyPoints
+                phone: user.phone,
+                loyaltyPoints: user.loyaltyPoints || 0
             }
         });
         
@@ -129,192 +121,27 @@ router.post('/login', async (req, res) => {
 });
 
 // ============================================
-// MOBILE NUMBER LOGIN (OTP based)
+// VERIFY TOKEN
 // ============================================
-// Store OTPs temporarily (use Redis in production)
-const otpStore = {};
-
-// Send OTP
-router.post('/send-otp', async (req, res) => {
-    try {
-        const { mobile } = req.body;
-        
-        // Generate 6-digit OTP
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        
-        // Store OTP with expiry (5 minutes)
-        otpStore[mobile] = {
-            otp,
-            expiresAt: Date.now() + 5 * 60 * 1000
-        };
-        
-        console.log(`📱 OTP for ${mobile}: ${otp}`); // In production, send via SMS
-        
-        // In production, send SMS using Twilio or other service
-        // await sendSMS(mobile, `Your Beauty Bar login OTP is: ${otp}`);
-        
-        res.json({
-            success: true,
-            message: 'OTP sent successfully'
-        });
-        
-    } catch (error) {
-        console.error('Send OTP error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to send OTP'
-        });
-    }
-});
-
-// Verify OTP and login
-router.post('/verify-otp', async (req, res) => {
-    try {
-        const { mobile, otp, name } = req.body;
-        
-        // Check OTP
-        const storedOtp = otpStore[mobile];
-        if (!storedOtp || storedOtp.otp !== otp) {
-            return res.status(401).json({
-                success: false,
-                message: 'Invalid OTP'
-            });
-        }
-        
-        if (Date.now() > storedOtp.expiresAt) {
-            delete otpStore[mobile];
-            return res.status(401).json({
-                success: false,
-                message: 'OTP expired'
-            });
-        }
-        
-        // Find or create user
-        let user = await User.findOne({ mobile });
-        
-        if (!user) {
-            // Create new user with mobile number
-            user = new User({
-                name: name || `User_${mobile.slice(-4)}`,
-                email: `${mobile}@temp.com`,
-                mobile: mobile,
-                lastLogin: new Date()
-            });
-            await user.save();
-        } else {
-            user.lastLogin = new Date();
-            await user.save();
-        }
-        
-        // Clear OTP
-        delete otpStore[mobile];
-        
-        // Generate JWT token
-        const token = jwt.sign(
-            { userId: user._id, email: user.email },
-            process.env.JWT_SECRET,
-            { expiresIn: '7d' }
-        );
-        
-        res.json({
-            success: true,
-            token,
-            user: {
-                id: user._id,
-                name: user.name,
-                email: user.email,
-                mobile: user.mobile,
-                loyaltyPoints: user.loyaltyPoints
-            }
-        });
-        
-    } catch (error) {
-        console.error('Verify OTP error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Verification failed'
-        });
-    }
-});
-
-// ============================================
-// GOOGLE AUTH (Keep existing)
-// ============================================
-router.post('/google', async (req, res) => {
-    try {
-        const { credential } = req.body;
-        
-        const ticket = await googleClient.verifyIdToken({
-            idToken: credential,
-            audience: process.env.GOOGLE_CLIENT_ID
-        });
-        
-        const payload = ticket.getPayload();
-        
-        if (!payload.email.endsWith('@gmail.com')) {
-            return res.status(400).json({
-                success: false,
-                message: 'Only Gmail accounts are allowed'
-            });
-        }
-        
-        let user = await User.findOne({ googleId: payload.sub });
-        
-        if (!user) {
-            user = new User({
-                googleId: payload.sub,
-                email: payload.email,
-                name: payload.name,
-                picture: payload.picture,
-                lastLogin: new Date()
-            });
-            await user.save();
-        } else {
-            user.lastLogin = Date.now();
-            await user.save();
-        }
-        
-        const token = jwt.sign(
-            { userId: user._id, email: user.email },
-            process.env.JWT_SECRET,
-            { expiresIn: '7d' }
-        );
-        
-        res.json({
-            success: true,
-            token,
-            user: {
-                id: user._id,
-                name: user.name,
-                email: user.email,
-                picture: user.picture,
-                loyaltyPoints: user.loyaltyPoints || 0
-            }
-        });
-        
-    } catch (error) {
-        console.error('Google auth error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Authentication failed'
-        });
-    }
-});
-
-// Verify token
 router.get('/verify', async (req, res) => {
     try {
         const token = req.headers.authorization?.split(' ')[1];
         
         if (!token) {
-            return res.status(401).json({ valid: false, message: 'No token provided' });
+            return res.status(401).json({
+                valid: false,
+                message: 'No token provided'
+            });
         }
         
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         const user = await User.findById(decoded.userId);
         
         if (!user) {
-            return res.status(401).json({ valid: false, message: 'User not found' });
+            return res.status(401).json({
+                valid: false,
+                message: 'User not found'
+            });
         }
         
         res.json({
@@ -323,23 +150,76 @@ router.get('/verify', async (req, res) => {
                 id: user._id,
                 name: user.name,
                 email: user.email,
-                picture: user.picture,
-                mobile: user.mobile
+                phone: user.phone,
+                loyaltyPoints: user.loyaltyPoints || 0
             }
         });
         
     } catch (error) {
         console.error('Token verification error:', error);
-        res.status(401).json({ valid: false, message: 'Invalid token' });
+        res.status(401).json({
+            valid: false,
+            message: 'Invalid token'
+        });
     }
 });
 
-// Middleware to verify JWT token
+// ============================================
+// GET USER PROFILE
+// ============================================
+router.get('/profile', async (req, res) => {
+    try {
+        const token = req.headers.authorization?.split(' ')[1];
+        
+        if (!token) {
+            return res.status(401).json({
+                success: false,
+                message: 'No token provided'
+            });
+        }
+        
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const user = await User.findById(decoded.userId);
+        
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+        
+        res.json({
+            success: true,
+            user: {
+                id: user._id,
+                name: user.name,
+                email: user.email,
+                phone: user.phone,
+                loyaltyPoints: user.loyaltyPoints || 0,
+                totalBookings: user.totalBookings || 0
+            }
+        });
+        
+    } catch (error) {
+        console.error('Profile error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch profile'
+        });
+    }
+});
+
+// ============================================
+// MIDDLEWARE: Verify Token
+// ============================================
 const verifyToken = (req, res, next) => {
     const token = req.headers.authorization?.split(' ')[1];
     
     if (!token) {
-        return res.status(401).json({ success: false, message: 'Authentication required' });
+        return res.status(401).json({
+            success: false,
+            message: 'Authentication required'
+        });
     }
     
     try {
@@ -347,7 +227,10 @@ const verifyToken = (req, res, next) => {
         req.userId = decoded.userId;
         next();
     } catch (error) {
-        res.status(401).json({ success: false, message: 'Invalid or expired token' });
+        res.status(401).json({
+            success: false,
+            message: 'Invalid or expired token'
+        });
     }
 };
 
